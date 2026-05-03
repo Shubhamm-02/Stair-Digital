@@ -41,6 +41,8 @@ streamlit run app.py
 
 Streamlit opens a local browser tab. Upload `sample.pdf`, then ask questions from [test_queries.md](test_queries.md).
 
+When the uploaded file is named exactly `sample.pdf`, the app also shows preset demo questions as one-click buttons. They use the same chat pipeline as typed questions and are included only to make evaluator demos faster.
+
 ## Files
 
 - [app.py](app.py) — Streamlit interface

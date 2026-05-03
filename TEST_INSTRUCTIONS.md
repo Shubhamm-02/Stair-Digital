@@ -15,6 +15,7 @@ Follow the steps below to verify grounding, accuracy, citations, and out-of-scop
 3. Open the local Streamlit URL.
 4. Upload the provided **`sample.pdf`** file.
 5. Wait for the success message showing the PDF has been loaded.
+6. Optional: use the preset demo question buttons that appear for `sample.pdf`, or type the same queries manually.
 
 ## Test Cases
 

@@ -8,6 +8,7 @@ The system is a lightweight PDF-constrained conversational agent. It separates g
 *   **Agent core:** `pdf_rag.py` handles PDF validation, page-text extraction, retrieval, prompt construction, OpenAI calls, fallback behavior, and citation/refusal validation.
 *   **AI engine:** OpenAI Responses API with `gpt-4.1-mini` by default.
 *   **Session state:** Uploaded PDFs are stored in Streamlit session state as `PdfDocument` objects containing page-numbered text. Conversation history is also held in Streamlit session state.
+*   **Demo affordance:** When the uploaded file is exactly `sample.pdf`, the UI displays one-click sample questions. These buttons call the same grounded chat path as manually typed prompts and are not shown for other PDFs.
 
 ## 2. Key Technical Decisions
 
