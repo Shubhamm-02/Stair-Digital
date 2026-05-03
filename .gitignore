@@ -1,12 +1,9 @@
 .env
+.streamlit/secrets.toml
 .DS_Store
 __pycache__/
 *.py[cod]
+.pytest_cache/
+*.log
 venv/
 .venv/
-
-frontend/node_modules/
-frontend/dist/
-frontend/*.tsbuildinfo
-frontend/vite.config.d.ts
-frontend/vite.config.js
