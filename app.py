@@ -117,7 +117,7 @@ def main() -> None:
         prompt = st.session_state.queued_prompt
         st.session_state.queued_prompt = None
         answer_prompt(client, prompt)
-        return
+        st.rerun()
 
     prompt = st.chat_input("Ask about the PDF...")
     if not prompt:
