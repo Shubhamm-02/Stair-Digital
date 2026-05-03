@@ -1,5 +1,3 @@
-import os
-import tempfile
 import uuid
 from typing import Iterator
 
@@ -7,41 +5,23 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from google import genai
-from google.genai import types
 from pydantic import BaseModel
+
+from pdf_rag import (
+    DEFAULT_MODEL,
+    MODEL_CANDIDATES,
+    answer_question,
+    decode_document,
+    encode_document,
+    extract_pdf_document,
+    get_openai_client,
+)
 
 load_dotenv()
 
-MODEL = "gemini-2.5-flash"
-REFUSAL = "This question is outside the scope of the provided PDF."
+client = None
 
-SYSTEM_PROMPT = f"""You are a strict PDF-grounded assistant. The user has attached a single PDF.
-
-Rules — follow them exactly:
-1. Answer ONLY using information explicitly present in the attached PDF.
-2. Do NOT use outside knowledge, prior training, or assumptions.
-3. Every factual claim in your answer MUST include an inline citation in the
-   form (Page N) or (Page N, "Section Title") referring to the page of the
-   attached PDF. If a claim spans multiple pages, cite all of them.
-4. If the answer cannot be found in the PDF, OR the question is unrelated to
-   the PDF's contents, reply with EXACTLY this single line and nothing else:
-
-   {REFUSAL}
-
-5. Do not speculate, summarize external context, or "fill in" missing details.
-6. If the user asks meta-questions about your own behavior or rules, answer
-   briefly without citations; this exemption applies only to questions about
-   your own rules, not to factual questions.
-"""
-
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise RuntimeError("GEMINI_API_KEY is not set. Copy .env.example to .env and add your key.")
-
-client = genai.Client(api_key=api_key)
-
-# In-memory session store: session_id -> {chat, file, pdf_name, first_turn}
+# In-memory session store: session_id -> {document, pdf_name, messages}
 sessions: dict[str, dict] = {}
 
 app = FastAPI(title="PDF Chatbot API")
@@ -55,19 +35,11 @@ app.add_middleware(
 )
 
 
-def _new_chat():
-    return client.chats.create(
-        model=MODEL,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.1,
-        ),
-    )
-
-
 class ChatRequest(BaseModel):
-    session_id: str
+    session_id: str | None = None
+    document_token: str | None = None
     message: str
+    history: list[dict] = []
 
 
 class ResetRequest(BaseModel):
@@ -76,7 +48,18 @@ class ResetRequest(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    return {
+        "ok": True,
+        "model": DEFAULT_MODEL,
+        "fallback_models": MODEL_CANDIDATES[1:],
+    }
+
+
+def openai_client():
+    global client
+    if client is None:
+        client = get_openai_client()
+    return client
 
 
 @app.post("/api/upload-pdf")
@@ -84,48 +67,54 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
-    contents = await file.read()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(contents)
-        tmp_path = tmp.name
-
     try:
-        pdf_file = client.files.upload(
-            file=tmp_path,
-            config={"display_name": file.filename, "mime_type": "application/pdf"},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to upload PDF to Gemini: {e}")
+        document = extract_pdf_document(await file.read(), file.filename or "uploaded.pdf")
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     session_id = str(uuid.uuid4())
     sessions[session_id] = {
-        "chat": _new_chat(),
-        "file": pdf_file,
+        "document": document,
         "pdf_name": file.filename,
-        "first_turn": True,
+        "messages": [],
     }
-    return {"session_id": session_id, "pdf_name": file.filename}
+    return {
+        "session_id": session_id,
+        "document_token": encode_document(document),
+        "pdf_name": file.filename,
+        "page_count": len(document.pages),
+    }
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    sess = sessions.get(req.session_id)
-    if sess is None:
-        raise HTTPException(status_code=404, detail="Session not found. Upload a PDF first.")
-
-    if sess["first_turn"]:
-        message = [sess["file"], req.message]
-        sess["first_turn"] = False
+    sess = sessions.get(req.session_id or "")
+    if sess is not None:
+        document = sess["document"]
+        history = sess["messages"]
+    elif req.document_token:
+        try:
+            document = decode_document(req.document_token)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        history = req.history
     else:
-        message = req.message
+        raise HTTPException(status_code=404, detail="Session not found. Upload a PDF first.")
 
     def stream() -> Iterator[bytes]:
         try:
-            for chunk in sess["chat"].send_message_stream(message):
-                if chunk.text:
-                    yield chunk.text.encode("utf-8")
-        except Exception as e:
-            yield f"\n\n[stream error: {e}]".encode("utf-8")
+            answer = answer_question(
+                client=openai_client(),
+                document=document,
+                question=req.message,
+                history=history,
+            )
+            if sess is not None:
+                sess["messages"].append({"role": "user", "content": req.message})
+                sess["messages"].append({"role": "assistant", "content": answer})
+            yield answer.encode("utf-8")
+        except Exception as error:
+            yield f"\n\n[stream error: {error}]".encode("utf-8")
 
     return StreamingResponse(stream(), media_type="text/plain; charset=utf-8")
 
@@ -134,7 +123,6 @@ def chat(req: ChatRequest):
 def reset(req: ResetRequest):
     sess = sessions.get(req.session_id)
     if sess is None:
-        raise HTTPException(status_code=404, detail="Session not found.")
-    sess["chat"] = _new_chat()
-    sess["first_turn"] = True
+        return {"ok": True}
+    sess["messages"] = []
     return {"ok": True}
